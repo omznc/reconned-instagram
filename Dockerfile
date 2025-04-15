@@ -1,5 +1,4 @@
 ARG BINARY_NAME_DEFAULT=reconned-instagram
-ARG MY_GREAT_CONFIG_DEFAULT="someconfig-default-value"
 
 FROM clux/muslrust:stable AS builder
 RUN groupadd -g 10001 -r dockergrp && useradd -r -g dockergrp -u 10001 dockeruser
@@ -9,10 +8,13 @@ ENV BINARY_NAME=$BINARY_NAME_DEFAULT
 # Fix OpenSSL build issues for cross-compilation
 RUN apt-get update && apt-get install -y ca-certificates musl-dev pkg-config wget
 
+# Explicitly add the musl target
+RUN rustup target add x86_64-unknown-linux-musl
+
 # Set environment variables for OpenSSL
 ENV OPENSSL_DIR=/usr/local/musl/ 
 ENV OPENSSL_INCLUDE_DIR=/usr/local/musl/include/
-ENV OPENSSL_LIB_DIR=/usr/local/musl/lib/
+ENV OPENSSL_LIB_DIR=/usr/local/musl/lib/    
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_DIR=/etc/ssl/certs
 
