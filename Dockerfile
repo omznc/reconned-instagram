@@ -1,63 +1,34 @@
-ARG BINARY_NAME_DEFAULT=reconned-instagram
+# Use the official Rust image as the build stage
+FROM rust:slim AS builder
 
-FROM clux/muslrust:stable AS builder
-RUN groupadd -g 10001 -r dockergrp && useradd -r -g dockergrp -u 10001 dockeruser
-ARG BINARY_NAME_DEFAULT
-ENV BINARY_NAME=$BINARY_NAME_DEFAULT
+# Install OpenSSL development packages and pkg-config
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Fix OpenSSL build issues for cross-compilation
-RUN apt-get update && apt-get install -y ca-certificates musl-dev pkg-config wget
+# Create a new empty shell project
+WORKDIR /app
+COPY . .
 
-# Explicitly add the musl target
-RUN rustup target add x86_64-unknown-linux-musl
+# Build the application with release optimizations
+RUN cargo build --release
 
-# Set environment variables for OpenSSL
-ENV OPENSSL_DIR=/usr/local/musl/ 
-ENV OPENSSL_INCLUDE_DIR=/usr/local/musl/include/
-ENV OPENSSL_LIB_DIR=/usr/local/musl/lib/    
-ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
-ENV SSL_CERT_DIR=/etc/ssl/certs
+# Use a smaller base image for the runtime
+FROM debian:bookworm-slim
 
-# Let Rust know we prefer to use the native SSL cert store
-ENV RUSTFLAGS="-C target-feature=-crt-static"
-ENV CARGO_HTTP_CAINFO=/etc/ssl/certs/ca-certificates.crt
+# Install OpenSSL and CA certificates which are required for HTTPS requests
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
 
-# Copy the certificates to the builder directory for the final image
-RUN mkdir -p /build-out/etc/ssl/certs
-RUN cp /etc/ssl/certs/ca-certificates.crt /build-out/etc/ssl/certs/
+# Copy the binary from builder to this new stage
+WORKDIR /app
+COPY --from=builder /app/target/release/reconned-instagram .
 
-# Build dummy main with the project's Cargo lock and toml
-# This is a docker trick in order to avoid downloading and building 
-# dependencies when lock and toml not is modified.
-COPY Cargo.lock .
-COPY Cargo.toml .
-RUN mkdir src \
-    && echo "fn main() {print!(\"Dummy main\");} // dummy file" > src/main.rs
-RUN set -x && cargo build --target x86_64-unknown-linux-musl --release
-RUN ["/bin/bash", "-c", "set -x && rm target/x86_64-unknown-linux-musl/release/deps/${BINARY_NAME//-/_}*"]
-
-# Now add the rest of the project and build the real main
-COPY src ./src
-RUN set -x && cargo build --target x86_64-unknown-linux-musl --release
-RUN mkdir -p /build-out
-RUN set -x && cp target/x86_64-unknown-linux-musl/release/$BINARY_NAME /build-out/
-
-# Create a scratch based image
-FROM scratch
-
-# Copy the SSL certificates from the builder stage
-COPY --from=builder /build-out/etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-ARG BINARY_NAME_DEFAULT
-ENV BINARY_NAME=$BINARY_NAME_DEFAULT
-ARG MY_GREAT_CONFIG_DEFAULT
-ENV MY_GREAT_CONFIG=$MY_GREAT_CONFIG_DEFAULT
-
-ENV RUST_LOG="error,$BINARY_NAME=info"
-ENV SSL_CERT_FILE="/etc/ssl/certs/ca-certificates.crt"
-ENV SSL_CERT_DIR="/etc/ssl/certs"
-
-COPY --from=builder /build-out/$BINARY_NAME_DEFAULT /reconned-instagram
-
+# Expose the port the app runs on
 EXPOSE 8080
-ENTRYPOINT ["/reconned-instagram"]
+
+# Command to run the executable
+CMD ["./reconned-instagram"]

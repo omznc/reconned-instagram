@@ -3,8 +3,10 @@ use serde::{Deserialize, Serialize};
 use reqwest::Client;
 use futures::future::join_all;
 use chrono::{DateTime, Utc};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::env;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 // The expected token is now loaded from environment variable
 fn get_auth_token() -> String {
@@ -14,7 +16,7 @@ fn get_auth_token() -> String {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct InstagramPost {
     image_url: String,
     video_preview_url: Option<String>,
@@ -22,7 +24,7 @@ struct InstagramPost {
     date: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct InstagramUserPosts {
     username: String,
     full_name: String,
@@ -34,6 +36,18 @@ struct InstagramUserPosts {
     following_count: i64,
     posts_count: i64,
     posts: Vec<InstagramPost>,
+}
+
+// Cache entry structure to store data with timestamp
+struct CacheEntry {
+    data: InstagramUserPosts,
+    timestamp: Instant,
+}
+
+// App state with in-memory cache
+struct AppState {
+    cache: Mutex<HashMap<String, CacheEntry>>,
+    client: Client,
 }
 
 // Use this structure to parse the endpoint query parameters.
@@ -230,7 +244,7 @@ async fn fetch_instagram_posts(client: &Client, username: &str) -> Result<Instag
 
 // TypeScript return type:
 // export type InstagramApiResponse = InstagramUserPosts[];
-async fn instagram_handler(query: web::Query<QueryParams>) -> impl Responder {
+async fn instagram_handler(query: web::Query<QueryParams>, state: web::Data<Arc<AppState>>) -> impl Responder {
     // Validate token
     if query.token != get_auth_token() {
         return HttpResponse::Unauthorized().body("Invalid token");
@@ -248,37 +262,76 @@ async fn instagram_handler(query: web::Query<QueryParams>) -> impl Responder {
         return HttpResponse::BadRequest().body("No username provided");
     };
 
-    let client = Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-        .timeout(Duration::from_secs(30))
-        .build()
-        .expect("Failed to build HTTP client");
-
-    // Process each username concurrently.
-    let fetches = usernames.iter()
-        .map(|uname| fetch_instagram_posts(&client, uname));
-    let results = join_all(fetches).await;
-    
-    // Collect the results. If a call fails, you can decide on a fallback action.
-    // Here, we report an empty list for usernames that failed.
     let mut users_posts = Vec::new();
-    for (i, res) in results.into_iter().enumerate() {
-        match res {
-            Ok(data) => users_posts.push(data),
-            Err(_) => {
-
-                users_posts.push(InstagramUserPosts { 
-                    username: usernames.get(i).unwrap_or(&String::from("unknown")).clone(),
-                    full_name: String::new(),
-                    biography: String::new(),
-                    profile_pic_url: String::new(),
-                    is_private: false,
-                    is_verified: false,
-                    followers_count: 0,
-                    following_count: 0,
-                    posts_count: 0,
-                    posts: vec![] 
-                });
+    let mut usernames_to_fetch = Vec::new();
+    
+    // Check cache for each username
+    {
+        let cache_lock = &mut state.cache.lock().unwrap();
+        
+        // Set cache expiration time (1 hour)
+        let cache_expiry = Duration::from_secs(60 * 60);
+        let now = Instant::now();
+        
+        // Remove expired entries while we're at it
+        cache_lock.retain(|_, entry| now.duration_since(entry.timestamp) < cache_expiry);
+        
+        // Check for cached entries
+        for username in &usernames {
+            if let Some(entry) = cache_lock.get(username) {
+                if now.duration_since(entry.timestamp) < cache_expiry {
+                    // Cache hit
+                    println!("Cache hit for user: {}", username);
+                    users_posts.push(entry.data.clone());
+                } else {
+                    // Cache expired
+                    usernames_to_fetch.push(username.clone());
+                }
+            } else {
+                // Cache miss
+                usernames_to_fetch.push(username.clone());
+            }
+        }
+    }
+    
+    // Fetch data for uncached usernames
+    if !usernames_to_fetch.is_empty() {
+        // Process each username concurrently.
+        let fetches = usernames_to_fetch.iter()
+            .map(|uname| fetch_instagram_posts(&state.client, uname));
+        let results = join_all(fetches).await;
+        
+        let cache_lock = &mut state.cache.lock().unwrap();
+        
+        // Process results and update cache
+        for (i, res) in results.into_iter().enumerate() {
+            let username = &usernames_to_fetch[i];
+            
+            match res {
+                Ok(data) => {
+                    // Update cache
+                    cache_lock.insert(username.clone(), CacheEntry {
+                        data: data.clone(),
+                        timestamp: Instant::now(),
+                    });
+                    users_posts.push(data);
+                },
+                Err(_) => {
+                    let empty_data = InstagramUserPosts { 
+                        username: username.clone(),
+                        full_name: String::new(),
+                        biography: String::new(),
+                        profile_pic_url: String::new(),
+                        is_private: false,
+                        is_verified: false,
+                        followers_count: 0,
+                        following_count: 0,
+                        posts_count: 0,
+                        posts: vec![] 
+                    };
+                    
+                    users_posts.push(empty_data);
+                }
             }
         }
     }
@@ -289,9 +342,24 @@ async fn instagram_handler(query: web::Query<QueryParams>) -> impl Responder {
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     println!("Starting Instagram API server on http://0.0.0.0:8080");
+    
+    // Initialize client
+    let client = Client::builder()
+        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("Failed to build HTTP client");
+        
+    // Initialize app state with cache
+    let app_state = Arc::new(AppState {
+        cache: Mutex::new(HashMap::new()),
+        client,
+    });
+    
     // Bind the server to all interfaces on port 8080 for container compatibility
-    HttpServer::new(|| {
+    HttpServer::new(move || {
         App::new()
+            .app_data(web::Data::new(app_state.clone()))
             .route("/api/instagram_posts", web::get().to(instagram_handler))
     })
     .bind("0.0.0.0:8080")?
