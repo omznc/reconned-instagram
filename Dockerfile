@@ -5,11 +5,25 @@ FROM clux/muslrust:stable AS builder
 RUN groupadd -g 10001 -r dockergrp && useradd -r -g dockergrp -u 10001 dockeruser
 ARG BINARY_NAME_DEFAULT
 ENV BINARY_NAME=$BINARY_NAME_DEFAULT
-# Build the project with target x86_64-unknown-linux-musl
 
-# Install ca-certificates in the builder stage and add the musl target
-RUN apt-get update && apt-get install -y ca-certificates
-RUN rustup target add x86_64-unknown-linux-musl
+# Fix OpenSSL build issues for cross-compilation - install wget and other dependencies
+RUN apt-get update && apt-get install -y ca-certificates musl-dev pkg-config wget
+
+# Set environment variables for OpenSSL
+ENV OPENSSL_DIR=/usr/local/musl/ 
+ENV OPENSSL_INCLUDE_DIR=/usr/local/musl/include/
+ENV OPENSSL_LIB_DIR=/usr/local/musl/lib/
+
+# Install OpenSSL for musl
+RUN wget https://www.openssl.org/source/openssl-1.1.1q.tar.gz && \
+    tar -xzvf openssl-1.1.1q.tar.gz && \
+    cd openssl-1.1.1q && \
+    ./Configure no-shared no-async --prefix=/usr/local/musl --openssldir=/usr/local/musl linux-x86_64 && \
+    make depend && \
+    make -j$(nproc) && \
+    make install && \
+    cd .. && \
+    rm -rf openssl-1.1.1q*
 
 # Build dummy main with the project's Cargo lock and toml
 # This is a docker trick in order to avoid downloading and building 
