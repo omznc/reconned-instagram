@@ -7,8 +7,9 @@ ARG BINARY_NAME_DEFAULT
 ENV BINARY_NAME=$BINARY_NAME_DEFAULT
 # Build the project with target x86_64-unknown-linux-musl
 
-# Install ca-certificates in the builder stage
+# Install ca-certificates in the builder stage and add the musl target
 RUN apt-get update && apt-get install -y ca-certificates
+RUN rustup target add x86_64-unknown-linux-musl
 
 # Build dummy main with the project's Cargo lock and toml
 # This is a docker trick in order to avoid downloading and building 
